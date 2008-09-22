@@ -1,0 +1,3 @@
+This tool will be a console based interface to the p2net network.  It will be designed to do similar things to the gui, 
+but with only command line access.
+
