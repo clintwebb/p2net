@@ -1,0 +1,19 @@
+[Dir docs]
+Dirs=
+Files=features.txt/protocol.txt
+
+[Dir src]
+Dirs=p2net-cmd/p2net-console/p2netd/p2net-gui/p2net-svc
+Files=
+
+[Dir src/p2netd]
+Dirs=
+Files=main.c/Makefile/p2net.h/settings.h
+
+[Project Dir]
+Dirs=admin/docs/src
+Files=
+
+[Project File]
+Name=p2net
+Type=Default

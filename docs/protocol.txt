@@ -1,0 +1,127 @@
+Uses RISC based command protocol.
+
+Commands:
+	CLEAR
+	EXECUTE
+	SUCCESS
+	FAIL
+
+Operations
+
+When the client makes a request, all it gives is a URL.
+The controller needs to make a request to the p2net for that URL.
+
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	TTL 15
+	SOURCE 201.11.44.30:14001
+	SEARCH
+	EXECUTE
+
+This will put the search out there to all the currently connected nodes.  When other nodes get this, it will send of the request to other nodes, after decrementing the TTL, and adding a PATH field (which would have the sourceIP).
+	
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	TTL 14
+	SOURCE 201.11.44.30:14001
+	PATH 201.11.44.30:14001,145.1.1.28:140001
+	SEARCH
+	EXECUTE
+
+It will then look in its tables to see if it knows anything about this URL. 
+If it does have (parts of) the file, it will attempt to connect directly to the source.
+
+If it can't connect directly to the source, it will reply back to the last entry in the 'PATH' (which it should still have a connection to).
+
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	SOURCE 201.11.44.30:14001
+	PATH 201.11.44.30:14001
+	TARGET 211.200.1.100:14001
+	FOUND
+	EXECUTE
+
+This node should then pass it on to the next in the path (which may still be connected since the original message went this way).
+
+If the last entry in the path cant be connected to anymore, then it will give up after a while and try to connect to the next one in the path list, and so on.
+
+When a remote node is able to connect to the source of the search request, it will respond with.
+
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	ALTERNATE http://www.rhokz.com/largefile.avi
+	EXECUTE
+	ALTERNATE http://flapjack.com/largefile.avi
+	EXECUTE
+	SIZE <size>
+	MD5 <md5-sum>
+	EXECUTE
+
+The client will then request a chunk-map from the connected node.
+
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	MD5 <md5-sum>
+	REQUEST_MAP
+	EXECUTE
+	
+and the server will respond with
+	
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	MD5 <md5-sum>
+	CHUNKSIZE <bytes>
+	CHUNKTOTOAL <count>
+	CHUNKMAP <binary chunk data>	
+	EXECUTE
+
+The source node will know that it can get at least some of the file from this node, so it will request a number of chunks (based on the chunkmap).
+
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	CHUNK <chunk>
+	REQUEST
+	EXECUTE
+
+The remote node (assuming that it still has the file, and still has the chunk, will respond with.
+
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	CHUNK <chunk>
+	SIZE <size>
+	DATA <data>
+	MD5 <md5-sum>
+	RESPONSE
+	EXECUTE
+
+This chunk would be stored and added to the peices of the file that we have already received.  The source node would then send another request.
+
+None of the connections will assume that any state on the connections are kept other than remembering the last commands received (until a CLEAR command is received).
+
+Periodically, the nodes will ask each other for some other servers that are in the p2net that they can talk to.  This is so that if a node exits, the clients can all re-connect to the other nodes without having to make requests to the tracker.
+
+	CLEAR
+	SERVER <ip:port>
+	MORE
+	EXECUTE
+
+The only times the server will return with a FAILURE tag is when a command is received that is invalid.  It will not perform any operation, and it will be up to the client to determine what kind of problem it is.  The node that logged the failure should temporarily block the client if it continues to send invalid commands.
+
+If a client make a request that the server cannot provide, it can send an adjustment message.  For example, if the node connects to another node ready to supply a file, but the node has already received all the parts for it, it would receive a
+
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	COMPLETE
+	SIZE <size>
+	MD5 <md5-sum>
+	EXECUTE
+	
+If a server receives a request for a chunk that the server doesn't have, it will respond with.
+
+	CLEAR
+	URL http://rhokz.com/largefile.avi
+	CHUNK <chunk>
+	UNAVAILABLE
+	EXECUTE	
+
+
