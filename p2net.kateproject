@@ -8,7 +8,7 @@ Files=
 
 [Dir src/p2netd]
 Dirs=
-Files=main.c/Makefile/p2net.h/settings.h
+Files=main.c/Makefile/p2net.h/settings.h/settings.c/info.c/info.h/connections.c/connections.h
 
 [Project Dir]
 Dirs=admin/docs/src

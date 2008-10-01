@@ -1,9 +1,14 @@
 // p2net - daemon.
 
-
+#include <event.h>
 
 #include "p2net.h"
 #include "settings.h"
+#include "info.h"
+
+// global settings object.
+static Settings *settings;
+
 
 //-#include <sys/stat.h>
 //-#include <sys/socket.h>
@@ -34,25 +39,6 @@
 //-#endif
 
 
-//-#ifndef HAVE_DAEMON
-//-extern int daemon(int nochdir, int noclose);
-//-#endif
-/*
- * forward declarations
- */
-//-static int new_socket(struct addrinfo *ai);
-//-static int server_socket(const int port, enum protocol prot);
-//-static int try_read_command(conn *c);
-//-static int try_read_network(conn *c);
-//-static void conn_set_state(conn *c, enum conn_states state);
-
-/* stats */
-//-static void stats_reset(void);
-//-static void stats_init(void);
-
-/* defaults */
-//-static void settings_init(void);
-
 /* event handling, network IO */
 //-static void conn_close(conn *c);
 //-static void conn_init(void);
@@ -70,274 +56,13 @@
 
 //-static void conn_free(conn *c);
 
-/** exported globals **/
-//-struct stats stats;
-//-struct settings settings;
-
-/** file scope variables **/
 //-static item **todelete = NULL;
 //-static int delcurr;
 //-static int deltotal;
 //-static conn *listen_conn = NULL;
 
-/* CJW: why was this static? */
-//-struct event_base *main_base;
+struct event_base *main_base;
 
-
-
-static void settings_init(void) {
-    settings.port = DEFAULT_PORT;
-    settings.maxconns = 1024;
-    settings.verbose = 0;
-}
-
-
-
-/*
- * Free list management for connections.
- */
-static conn **freeconns;
-static int freetotal;
-static int freecurr;
-
-//- not sure if we should do it this way.
-static void conn_init(void) {
-    freetotal = 200;
-    freecurr = 0;
-    if ((freeconns = (conn **)malloc(sizeof(conn *) * freetotal)) == NULL) {
-        fprintf(stderr, "malloc()\n");
-    }
-    return;
-}
-
-/*
- * Returns a connection from the freelist, if any. Should call this using
- * conn_from_freelist() for thread safety.
- */
-conn *do_conn_from_freelist() {
-    conn *c;
-
-    if (freecurr > 0) {
-        c = freeconns[--freecurr];
-    } else {
-        c = NULL;
-    }
-
-    return c;
-}
-
-/*
- * Adds a connection to the freelist. 0 = success. Should call this using
- * conn_add_to_freelist() for thread safety.
- */
-bool do_conn_add_to_freelist(conn *c) {
-    if (freecurr < freetotal) {
-        freeconns[freecurr++] = c;
-        return false;
-    } else {
-        /* try to enlarge free connections array */
-        conn **new_freeconns = realloc(freeconns, sizeof(conn *) * freetotal * 2);
-        if (new_freeconns) {
-            freetotal *= 2;
-            freeconns = new_freeconns;
-            freeconns[freecurr++] = c;
-            return false;
-        }
-    }
-    return true;
-}
-
-// This function is called when a new connection is received.
-conn *conn_new(const int sfd, enum conn_states init_state,
-                const int event_flags,
-                const int read_buffer_size, enum protocol prot,
-                struct event_base *base) {
-	
-	conn *c = conn_from_freelist();
-
-	if (NULL == c) {
-		if (!(c = (conn *)malloc(sizeof(conn)))) {
-			fprintf(stderr, "malloc()\n");
-			return NULL;
-		}
-		c->rbuf = c->wbuf = 0;
-		c->ilist = 0;
-		c->suffixlist = 0;
-		c->iov = 0;
-		c->msglist = 0;
-		c->hdrbuf = 0;
-		
-		c->rsize = read_buffer_size;
-		c->wsize = DATA_BUFFER_SIZE;
-		c->isize = ITEM_LIST_INITIAL;
-		c->suffixsize = SUFFIX_LIST_INITIAL;
-		c->iovsize = IOV_LIST_INITIAL;
-		c->msgsize = MSG_LIST_INITIAL;
-		c->hdrsize = 0;
-		
-		c->rbuf = (char *)malloc((size_t)c->rsize);
-		c->wbuf = (char *)malloc((size_t)c->wsize);
-		c->ilist = (item **)malloc(sizeof(item *) * c->isize);
-		c->suffixlist = (char **)malloc(sizeof(char *) * c->suffixsize);
-		c->iov = (struct iovec *)malloc(sizeof(struct iovec) * c->iovsize);
-		c->msglist = (struct msghdr *)malloc(sizeof(struct msghdr) * c->msgsize);
-		
-		if (c->rbuf == 0 || c->wbuf == 0 || c->ilist == 0 || c->iov == 0 || c->msglist == 0 || c->suffixlist == 0) {
-			if (c->rbuf != 0) free(c->rbuf);
-			if (c->wbuf != 0) free(c->wbuf);
-			if (c->ilist !=0) free(c->ilist);
-			if (c->suffixlist != 0) free(c->suffixlist);
-			if (c->iov != 0) free(c->iov);
-			if (c->msglist != 0) free(c->msglist);
-			free(c);
-			fprintf(stderr, "malloc()\n");
-			return NULL;
-		}
-		
-		STATS_LOCK();
-		stats.conn_structs++;
-		STATS_UNLOCK();
-	}
-
-	/* unix socket mode doesn't need this, so zeroed out.  but why
-		* is this done for every command?  presumably for UDP
-		* mode.  */
-	if (!settings.socketpath) {
-		c->request_addr_size = sizeof(c->request_addr);
-	} else {
-		c->request_addr_size = 0;
-	}
-
-	c->sfd = sfd;
-	c->protocol = prot;
-	
-	if (prot == ascii_prot) { c->handler = asc_event_handler; }
-	else if (prot == ascii_udp_prot) { c->handler = udp_event_handler; }
-	else if (prot == binary_prot) { c->handler = bin_event_handler; }
-	else { c->handler = NULL; }
-	
-	c->extra = NULL;
-	
-	c->state = init_state;
-	c->rlbytes = 0;
-	c->rbytes = c->wbytes = 0;
-	c->wcurr = c->wbuf;
-	c->rcurr = c->rbuf;
-	c->ritem = 0;
-	c->icurr = c->ilist;
-	c->suffixcurr = c->suffixlist;
-	c->ileft = 0;
-	c->suffixleft = 0;
-	c->iovused = 0;
-	c->msgcurr = 0;
-	c->msgused = 0;
-	
-	c->write_and_go = init_state;
-	c->write_and_free = 0;
-	c->item = 0;
-	c->bucket = -1;
-	c->gen = 0;
-	
-	event_set(&c->event, sfd, event_flags, c->handler, (void *)c);
-	c->noreply = false;
-	event_base_set(base, &c->event);
-	c->ev_flags = event_flags;
-	
-	if (event_add(&c->event, 0) == -1) {
-		if (conn_add_to_freelist(c)) {
-			conn_free(c);
-		}
-		perror("event_add");
-		return NULL;
-	}
-
-	STATS_LOCK();
-	stats.curr_conns++;
-	stats.total_conns++;
-	STATS_UNLOCK();
-	
-	return c;
-}
-
-static void conn_cleanup(conn *c) {
-	assert(c != NULL);
-	
-	if (c->item) {
-		item_remove(c->item);
-		c->item = 0;
-	}
-	
-	if (c->ileft != 0) {
-		for (; c->ileft > 0; c->ileft--,c->icurr++) {
-			item_remove(*(c->icurr));
-		}
-	}
-	
-	if (c->suffixleft != 0) {
-		for (; c->suffixleft > 0; c->suffixleft--, c->suffixcurr++) {
-			if(suffix_add_to_freelist(*(c->suffixcurr))) {
-				free(*(c->suffixcurr));
-			}
-		}
-	}
-	
-	if (c->write_and_free) {
-		free(c->write_and_free);
-		c->write_and_free = 0;
-	}
-}
-
-/*
- * Frees a connection.
- */
-void conn_free(conn *c) {
-	if (c) {
-		if (c->hdrbuf)
-			free(c->hdrbuf);
-		if (c->msglist)
-			free(c->msglist);
-		if (c->rbuf)
-			free(c->rbuf);
-		if (c->wbuf)
-			free(c->wbuf);
-		if (c->ilist)
-			free(c->ilist);
-		if (c->suffixlist)
-			free(c->suffixlist);
-		if (c->iov)
-			free(c->iov);
-				
-		/* CJW-TODO: Need to actually clean up the extra data first, or we could introduce memory leaks */
-		if (c->extra) 
-			free(c->extra);
-		free(c);
-	}
-}
-
-static void conn_close(conn *c) {
-	assert(c != NULL);
-	
-	/* delete the event, the socket and the conn */
-	event_del(&c->event);
-	
-	if (settings.verbose > 1)
-		fprintf(stderr, "<%d connection closed.\n", c->sfd);
-	
-	close(c->sfd);
-	accept_new_conns(true);
-	conn_cleanup(c);
-	
-	/* if the connection has big buffers, just free it */
-	if (c->rsize > READ_BUFFER_HIGHWAT || conn_add_to_freelist(c)) {
-		conn_free(c);
-	}
-	
-	STATS_LOCK();
-	stats.curr_conns--;
-	STATS_UNLOCK();
-	
-	return;
-}
 
 static int get_init_state(conn *c) {
 	int rv=0;
@@ -2904,94 +2629,6 @@ void do_run_deferred_deletes(void)
     delcurr = j;
 }
 
-static void usage(void) {
-	printf(PACKAGE " " VERSION "\n");
-	printf("-p <num>      TCP port to listen on for p2net data (default: %d)\n", DEFAULT_PORT);
-	printf("-l <ip_addr>  interface to listen on, default is INDRR_ANY\n"
-					"-d            run as a daemon\n"
-					"-u <username> assume identity of <username> (only when run as root)\n"
-					"-m <num>      max memory to use for items in megabytes, default is 64 MB\n"
-					"-c <num>      max simultaneous connections, default is 1024\n"
-					"-v            verbose (print errors/warnings while in event loop)\n"
-					"-vv           very verbose (also print client commands/reponses)\n"
-					"-h            print this help and exit\n"
-					"-i            print p2net and libevent license\n"
-					"-P <file>     save PID in <file>, only used with -d option\n"
-					);
-	
-	return;
-}
-
-static void usage_license(void) {
-    printf(PACKAGE " " VERSION "\n\n");
-    printf(
-    "Copyright (c) 2003, Danga Interactive, Inc. <http://www.danga.com/>\n"
-    "All rights reserved.\n"
-    "\n"
-    "Redistribution and use in source and binary forms, with or without\n"
-    "modification, are permitted provided that the following conditions are\n"
-    "met:\n"
-    "\n"
-    "    * Redistributions of source code must retain the above copyright\n"
-    "notice, this list of conditions and the following disclaimer.\n"
-    "\n"
-    "    * Redistributions in binary form must reproduce the above\n"
-    "copyright notice, this list of conditions and the following disclaimer\n"
-    "in the documentation and/or other materials provided with the\n"
-    "distribution.\n"
-    "\n"
-    "    * Neither the name of the Danga Interactive nor the names of its\n"
-    "contributors may be used to endorse or promote products derived from\n"
-    "this software without specific prior written permission.\n"
-    "\n"
-    "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n"
-    "\"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n"
-    "LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\n"
-    "A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT\n"
-    "OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,\n"
-    "SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT\n"
-    "LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n"
-    "DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n"
-    "THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n"
-    "(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n"
-    "OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n"
-    "\n"
-    "\n"
-    "This product includes software developed by Niels Provos.\n"
-    "\n"
-    "[ libevent ]\n"
-    "\n"
-    "Copyright 2000-2003 Niels Provos <provos@citi.umich.edu>\n"
-    "All rights reserved.\n"
-    "\n"
-    "Redistribution and use in source and binary forms, with or without\n"
-    "modification, are permitted provided that the following conditions\n"
-    "are met:\n"
-    "1. Redistributions of source code must retain the above copyright\n"
-    "   notice, this list of conditions and the following disclaimer.\n"
-    "2. Redistributions in binary form must reproduce the above copyright\n"
-    "   notice, this list of conditions and the following disclaimer in the\n"
-    "   documentation and/or other materials provided with the distribution.\n"
-    "3. All advertising materials mentioning features or use of this software\n"
-    "   must display the following acknowledgement:\n"
-    "      This product includes software developed by Niels Provos.\n"
-    "4. The name of the author may not be used to endorse or promote products\n"
-    "   derived from this software without specific prior written permission.\n"
-    "\n"
-    "THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR\n"
-    "IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES\n"
-    "OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.\n"
-    "IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,\n"
-    "INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT\n"
-    "NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n"
-    "DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n"
-    "THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n"
-    "(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF\n"
-    "THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n"
-    );
-
-    return;
-}
 
 static void save_pid(const pid_t pid, const char *pid_file) {
     FILE *fp;
@@ -3020,232 +2657,165 @@ static void remove_pidfile(const char *pid_file) {
 
 }
 
+//-----------------------------------------------------------------------------
+// Handle the signal.  Any signal we receive can only mean that we need to exit.
 static void sig_handler(const int sig) {
     printf("SIGINT handled.\n");
     exit(EXIT_SUCCESS);
 }
 
+static void set_maxconns(int maxconns) 
+{
+	struct rlimit rlim;
 
+	if (getrlimit(RLIMIT_NOFILE, &rlim) != 0) {
+		fprintf(stderr, "failed to getrlimit number of files\n");
+		exit(EXIT_FAILURE);
+	} else {
+		if (rlim.rlim_cur < maxconns)
+			rlim.rlim_cur = maxconns + 3;
+		if (rlim.rlim_max < rlim.rlim_cur)
+			rlim.rlim_max = rlim.rlim_cur;
+		if (setrlimit(RLIMIT_NOFILE, &rlim) != 0) {
+			fprintf(stderr, "failed to set rlimit for open files. Try running as root or requesting smaller maxconns value.\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+}
+
+
+/* lose root privileges if we have them */
+static void drop_privs(void)
+{
+  char *username = NULL;
+	struct passwd *pw;
+  
+	if (getuid() == 0 || geteuid() == 0) {
+		if (username == 0 || *username == '\0') {
+			fprintf(stderr, "can't run as root without the -u switch\n");
+			return 1;
+		}
+		if ((pw = getpwnam(username)) == 0) {
+			fprintf(stderr, "can't find the user %s to switch to\n", username);
+			return 1;
+		}
+		if (setgid(pw->pw_gid) < 0 || setuid(pw->pw_uid) < 0) {
+			fprintf(stderr, "failed to assume identity of user %s\n", username);
+			return 1;
+		}
+	}
+}
+
+
+//-----------------------------------------------------------------------------
+// Main... process command line parameters, and then setup our listening 
+// sockets and event loop.
 int main (int argc, char **argv) {
-    int c;
-    bool lock_memory = false;
-    bool daemonize = false;
-    bool preallocate = false;
-    int maxcore = 0;
-    char *username = NULL;
-    char *pid_file = NULL;
-    struct passwd *pw;
-    struct sigaction sa;
-    struct rlimit rlim;
-    /* listening sockets */
-    static int *l_socket = NULL;
-    static int *bl_socket = NULL;
+///    int c;
+///    char *pid_file = NULL;
+///    struct sigaction sa;
+    
+/* listening sockets */
+///    static int *l_socket = NULL;
+///    static int *bl_socket = NULL;
 
-    /* udp socket */
-    static int *u_socket = NULL;
-    static int u_socket_count = 0;
 
-    /* handle SIGINT */
-    signal(SIGINT, sig_handler);
+	/* handle SIGINT */
+	signal(SIGINT, sig_handler);
+	
+	/* init settings */
+	settings_init(settings);
 
-    /* init settings */
-    settings_init();
+	/* set stderr non-buffering (for running under, say, daemontools) */
+	setbuf(stderr, NULL);
 
-    /* set stderr non-buffering (for running under, say, daemontools) */
-    setbuf(stderr, NULL);
+	/* process arguments */
+	/// Need to check the options in here, there re possibly ones that we dont need.
+	while ((c = getopt(argc, argv, "p:B:m:Mc:hirvdl:u:P:f:s:n:D:")) != -1) {
+		switch (c) {
+			case 'p':
+				settings.port = atoi(optarg);
+				break;
+			case 'm':
+        settings.maxbytes = ((size_t)atoi(optarg)) * 1024 * 1024;
+        break;
+    	case 'c':
+        settings.maxconns = atoi(optarg);
+        break;
+			case 'h':
+				usage();
+				exit(EXIT_SUCCESS);
+			case 'i':
+				usage_license();
+				exit(EXIT_SUCCESS);
+			case 'v':
+				settings.verbose++;
+				break;
+			case 'l':
+				settings.inter= strdup(optarg);
+				break;
+			case 'd':
+				daemonize = true;
+				break;
+			case 'r':
+				maxcore = 1;
+				break;
+			case 'u':
+				username = optarg;
+				break;
+			case 'P':
+				pid_file = optarg;
+				break;
+			case 'f':
+				settings.factor = atof(optarg);
+				if (settings.factor <= 1.0) {
+					fprintf(stderr, "Factor must be greater than 1\n");
+					return 1;
+				}
+				break;
+			case 'n':
+				settings.chunk_size = atoi(optarg);
+				if (settings.chunk_size == 0) {
+					fprintf(stderr, "Chunk size must be greater than 0\n");
+					return 1;
+				}
+				break;
+			case 'D':
+				if (! optarg || ! optarg[0]) {
+					fprintf(stderr, "No delimiter specified\n");
+					return 1;
+				}
+				settings.prefix_delimiter = optarg[0];
+				settings.detail_enabled = 1;
+				break;
+			default:
+				fprintf(stderr, "Illegal argument \"%c\"\n", c);
+				return 1;
+		}
+	}
 
-    /* process arguments */
-    while ((c = getopt(argc, argv, "a:bp:B:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:")) != -1) {
-        switch (c) {
-        case 'a':
-            /* access for unix domain socket, as octal mask (like chmod)*/
-            settings.access= strtol(optarg,NULL,8);
-            break;
+	// If needed, increase rlimits to allow as many connections as needed.
+	set_maxconns(settings->maxconns);
 
-        case 'U':
-            settings.udpport = atoi(optarg);
-            break;
-        case 'b':
-            settings.managed = true;
-            break;
-        case 'p':
-            settings.port = atoi(optarg);
-            break;
-        case 's':
-            settings.socketpath = optarg;
-            break;
-        case 'm':
-            settings.maxbytes = ((size_t)atoi(optarg)) * 1024 * 1024;
-            break;
-        case 'M':
-            settings.evict_to_free = 0;
-            break;
-        case 'c':
-            settings.maxconns = atoi(optarg);
-            break;
-        case 'h':
-            usage();
-            exit(EXIT_SUCCESS);
-        case 'i':
-            usage_license();
-            exit(EXIT_SUCCESS);
-        case 'k':
-            lock_memory = true;
-            break;
-        case 'v':
-            settings.verbose++;
-            break;
-        case 'l':
-            settings.inter= strdup(optarg);
-            break;
-        case 'd':
-            daemonize = true;
-            break;
-        case 'r':
-            maxcore = 1;
-            break;
-        case 'u':
-            username = optarg;
-            break;
-        case 'P':
-            pid_file = optarg;
-            break;
-        case 'f':
-            settings.factor = atof(optarg);
-            if (settings.factor <= 1.0) {
-                fprintf(stderr, "Factor must be greater than 1\n");
-                return 1;
-            }
-            break;
-        case 'n':
-            settings.chunk_size = atoi(optarg);
-            if (settings.chunk_size == 0) {
-                fprintf(stderr, "Chunk size must be greater than 0\n");
-                return 1;
-            }
-            break;
-        case 't':
-            settings.num_threads = atoi(optarg);
-            if (settings.num_threads == 0) {
-                fprintf(stderr, "Number of threads must be greater than 0\n");
-                return 1;
-            }
-            break;
-        case 'D':
-            if (! optarg || ! optarg[0]) {
-                fprintf(stderr, "No delimiter specified\n");
-                return 1;
-            }
-            settings.prefix_delimiter = optarg[0];
-            settings.detail_enabled = 1;
-            break;
-#if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
-        case 'L' :
-            if (enable_large_pages() == 0) {
-                preallocate = true;
-            }
-            break;
-#endif
-        default:
-            fprintf(stderr, "Illegal argument \"%c\"\n", c);
-            return 1;
-        }
-    }
+	drop_privs();
 
-    if (maxcore != 0) {
-        struct rlimit rlim_new;
-        /*
-         * First try raising to infinity; if that fails, try bringing
-         * the soft limit to the hard.
-         */
-        if (getrlimit(RLIMIT_CORE, &rlim) == 0) {
-            rlim_new.rlim_cur = rlim_new.rlim_max = RLIM_INFINITY;
-            if (setrlimit(RLIMIT_CORE, &rlim_new)!= 0) {
-                /* failed. try raising just to the old max */
-                rlim_new.rlim_cur = rlim_new.rlim_max = rlim.rlim_max;
-                (void)setrlimit(RLIMIT_CORE, &rlim_new);
-            }
-        }
-        /*
-         * getrlimit again to see what we ended up with. Only fail if
-         * the soft limit ends up 0, because then no core files will be
-         * created at all.
-         */
+	/* daemonize if requested */
+	/* if we want to ensure our ability to dump core, don't chdir to / */
+	if (daemonize) {
+		int res;
+		res = daemon(0, settings->verbose);
+		if (res == -1) {
+			fprintf(stderr, "failed to daemon() in order to daemonize\n");
+			return 1;
+		}
+	}
 
-        if ((getrlimit(RLIMIT_CORE, &rlim) != 0) || rlim.rlim_cur == 0) {
-            fprintf(stderr, "failed to ensure corefile creation\n");
-            exit(EXIT_FAILURE);
-        }
-    }
+	/* initialize main thread libevent instance */
+	main_base = event_init();
 
-    /*
-     * If needed, increase rlimits to allow as many connections
-     * as needed.
-     */
-
-    if (getrlimit(RLIMIT_NOFILE, &rlim) != 0) {
-        fprintf(stderr, "failed to getrlimit number of files\n");
-        exit(EXIT_FAILURE);
-    } else {
-        int maxfiles = settings.maxconns;
-        if (rlim.rlim_cur < maxfiles)
-            rlim.rlim_cur = maxfiles + 3;
-        if (rlim.rlim_max < rlim.rlim_cur)
-            rlim.rlim_max = rlim.rlim_cur;
-        if (setrlimit(RLIMIT_NOFILE, &rlim) != 0) {
-            fprintf(stderr, "failed to set rlimit for open files. Try running as root or requesting smaller maxconns value.\n");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    /* lock paged memory if needed */
-    if (lock_memory) {
-#ifdef HAVE_MLOCKALL
-        int res = mlockall(MCL_CURRENT | MCL_FUTURE);
-        if (res != 0) {
-            fprintf(stderr, "warning: -k invalid, mlockall() failed: %s\n",
-                    strerror(errno));
-        }
-#else
-        fprintf(stderr, "warning: -k invalid, mlockall() not supported on this platform.  proceeding without.\n");
-#endif
-    }
-
-    /* lose root privileges if we have them */
-    if (getuid() == 0 || geteuid() == 0) {
-        if (username == 0 || *username == '\0') {
-            fprintf(stderr, "can't run as root without the -u switch\n");
-            return 1;
-        }
-        if ((pw = getpwnam(username)) == 0) {
-            fprintf(stderr, "can't find the user %s to switch to\n", username);
-            return 1;
-        }
-        if (setgid(pw->pw_gid) < 0 || setuid(pw->pw_uid) < 0) {
-            fprintf(stderr, "failed to assume identity of user %s\n", username);
-            return 1;
-        }
-    }
-
-    /* daemonize if requested */
-    /* if we want to ensure our ability to dump core, don't chdir to / */
-    if (daemonize) {
-        int res;
-        res = daemon(maxcore, settings.verbose);
-        if (res == -1) {
-            fprintf(stderr, "failed to daemon() in order to daemonize\n");
-            return 1;
-        }
-    }
-
-    /* initialize main thread libevent instance */
-    main_base = event_init();
-
-    /* initialize other stuff */
-    item_init();
-    stats_init();
-    assoc_init();
-    conn_init();
+	/* initialize other stuff */
+	conn_init();
+    
     /* Hacky suffix buffers. */
     suffix_init();
     slabs_init(settings.maxbytes, settings.factor, preallocate);
@@ -3271,12 +2841,12 @@ int main (int argc, char **argv) {
         perror("failed to ignore SIGPIPE; sigaction");
         exit(EXIT_FAILURE);
     }
-    /* start up worker threads if MT mode */
-    thread_init(settings.num_threads, main_base);
+    
     /* save the PID in if we're a daemon, do this after thread_init due to
        a file descriptor handling bug somewhere in libevent */
-    if (daemonize)
+    if (settings->daemonize)
         save_pid(getpid(), pid_file);
+        
     /* initialise clock event */
     clock_handler(0, 0, 0);
     /* initialise deletion array and timer event */

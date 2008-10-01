@@ -1,54 +1,53 @@
 Will work on simple GET url's and only for specified file types.
 
-The daemon will handle the network role, as well as the cache-proxy role.  But we may think about seperating those 
-functions at some point.
+The daemon will handle the network role, as well as the cache-proxy role.  But we may think about seperating those functions at some point.
 
 It should be written so that it can be built for linux and windows.
 
-Tracker software should also be available so that people can setup their own trackers and use them instead of our 
-standard one.
+Tracker software should also be available so that people can setup their own trackers and use them instead of our standard one.
 
-Should the tracker know anything about the files that are being requested?  Because it wont really know anything unless a 
-client tells it, and how will we know that clients are telling the truth.
+Should the tracker know anything about the files that are being requested?  Because it wont really know anything unless a client tells it, and how will we know that clients are telling the truth.
 
 System needs to be resiliant to invalid or incomplete data, supplied either maliciously or accidentally.  
 
 
 Client.
 ------
-If a request is made, it will attempt to download the file from the p2net, but will also get it partially from the 
-original source.  If the file no longer exists at the original source, then it should close down the requests to the 
-p2net and remove any data it has cached for it.  The other servers that have it would eventually remove it themselves, or 
-it will eventually expire.
+If a request is made, it will attempt to download the file from the p2net, but will also get it partially from the original source.  If the file no longer exists at the original source, then it should close down the requests to the p2net and remove any data it has cached for it.  The other servers that have it would eventually remove it themselves, or it will eventually expire.
 
 
 
 Daemon startup.
-When the daemon starts up, it will make a request to the tracker, which will return a number of IP addresses of other 
-servers in the network.   The daemon will try to maintain a number of connections to the p2net, and it will continue to 
-query the tracker every minute until it has enough.
+When the daemon starts up, it will make a request to the tracker, which will return a number of IP addresses of other servers in the network.   The daemon will try to maintain a number of connections to the p2net, and it will continue to query the tracker every minute until it has enough.
 
 
 Request timeline
 
   1.  User makes a request thru their browser for a large movie file.
   2.  request goes to the daemon proxy.
-  3.  Daemon will look in its complete cache for the file.  If it finds it, then returns it to the browser.
-  4.  Daemon will do a HEAD lookup for the file against the real webserver.  If the HEAD returns a 404 it will not 
-      request any further, will remove any partial info it has for this file.  Or if a 301 (or 302) is returned, then it 
-      will pass that back on to the orginal browser and it can make the request again if it wants.
+  3.  Daemon will look in its complete cache for the file.  If it finds it, then returns it to the 
+      browser.
+  4.  Daemon will do a HEAD lookup for the file against the real webserver.  If the HEAD returns a 404 it 
+      will not request any further, will remove any partial info it has for this file.  Or if a 301 (or 
+      302) is returned, then it will pass that back on to the orginal browser and it can make the request 
+      again if it wants.
   5.  Daemon will pass the file request to the p2net.
-  6.  Daemon will wait 1 second (configured) before starting a partial download, while waiting for the p2net to respond.
-  7.  Other nodes on the p2net will get the query, and if they have parts of the file (in whole or in part) then will 
-      respond back thru the node-path with info suggesting that it has the file.
-  8.  Daemon will recieve connect info from the other nodes and will connect to them, making the request for the files 
-      that it is attempting to download.
+  6.  Daemon will wait 1 second (configured) before starting a partial download, while waiting for the 
+      p2net to respond.
+  7.  Other nodes on the p2net will get the query, and if they have parts of the file (in whole or in 
+      part) then will respond back thru the node-path with info suggesting that it has the file.
+  8.  Daemon will recieve connect info from the other nodes and will connect to them, making the request 
+      for the files that it is attempting to download.
   9.  Daemon will request chunks from the nodes.
- 10.  If the nodes on the p2net does not have chunks of the file, then it will get those chunks directly from teh HTTP 
-      source.
- 11.  As the required chunks in sequence are received, they will be returned to the browser.  This means that we dont 
-      need to wait for the entire file to finish before passing it back to the browser.
+ 10.  If the nodes on the p2net does not have chunks of the file, then it will get those chunks directly 
+      from the HTTP source.
+ 11.  As the required chunks in sequence are received, they will be returned to the browser.  This means 
+      that we dont need to wait for the entire file to finish before passing it back to the browser.
 
 
 
 Command-line client will work the same way as the browser
+
+The daemon will be able to list particular directories as containing objects likely to be cached.  When it starts up, it will examine the files in those directories, and will 
+
+

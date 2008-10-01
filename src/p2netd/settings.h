@@ -5,8 +5,10 @@
 typedef struct {
 	int port;
 	int maxconns;
-	int verbose;
+	bool verbose;
+  bool daemonize;
 } Settings;
 
+void settings_init(Settings *ptr);
 
 #endif
